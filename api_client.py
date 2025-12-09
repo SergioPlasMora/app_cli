@@ -341,6 +341,10 @@ class APIClient:
             if output_file:
                 output_handle = open(output_file, 'wb')
             
+            # Buffer para detectar marcador de finalización
+            timestamps_from_stream = {}
+            pending_buffer = b""  # Buffer para datos pendientes
+            
             try:
                 for chunk in stream_response.iter_content(chunk_size=65536):
                     if not chunk:
@@ -349,23 +353,57 @@ class APIClient:
                     if t_first_byte is None:
                         t_first_byte = time.time_ns() / 1e9
                     
+                    # Agregar al buffer pendiente
+                    pending_buffer += chunk
+                    
                     # Verificar si contiene el marcador de finalización
-                    if b"---STREAM_COMPLETE---" in chunk:
-                        # Extraer solo la parte de datos (antes del marcador)
-                        marker_pos = chunk.find(b"\n---STREAM_COMPLETE---")
+                    if b"---STREAM_COMPLETE---" in pending_buffer:
+                        # Encontrar posición del marcador
+                        marker_pos = pending_buffer.find(b"\n---STREAM_COMPLETE---")
+                        if marker_pos == -1:
+                            marker_pos = pending_buffer.find(b"---STREAM_COMPLETE---")
+                        
+                        # Extraer datos antes del marcador
                         if marker_pos > 0:
-                            data_chunk = chunk[:marker_pos]
+                            data_chunk = pending_buffer[:marker_pos]
                             total_bytes += len(data_chunk)
                             chunks_received += 1
                             if output_handle:
                                 output_handle.write(data_chunk)
+                        
+                        # Parsear timestamps del JSON después del marcador
+                        try:
+                            import json
+                            marker_str = b"---STREAM_COMPLETE---"
+                            marker_end = pending_buffer.find(marker_str)
+                            if marker_end != -1:
+                                json_start = marker_end + len(marker_str)
+                                remaining = pending_buffer[json_start:].lstrip(b"\n\r")
+                                if remaining:
+                                    json_data = remaining.decode('utf-8').strip()
+                                    if json_data:
+                                        completion_info = json.loads(json_data)
+                                        timestamps_from_stream = {
+                                            "t1_received": completion_info.get("t1_received"),
+                                            "t2_received": completion_info.get("t2_received"),
+                                            "t3_start_send": completion_info.get("t3_start_send")
+                                        }
+                        except (json.JSONDecodeError, Exception) as e:
+                            import sys
+                            print(f"[DEBUG] Error parsing stream completion: {e}", file=sys.stderr)
+                            print(f"[DEBUG] Buffer content: {pending_buffer[-200:]}", file=sys.stderr)
                         break
-                    
-                    total_bytes += len(chunk)
-                    chunks_received += 1
-                    
-                    if output_handle:
-                        output_handle.write(chunk)
+                    else:
+                        # No hay marcador, escribir buffer excepto los últimos bytes (pueden ser parte del marcador)
+                        safe_len = len(pending_buffer) - 50  # Mantener últimos 50 bytes
+                        if safe_len > 0:
+                            data_to_write = pending_buffer[:safe_len]
+                            total_bytes += len(data_to_write)
+                            chunks_received += 1
+                            if output_handle:
+                                output_handle.write(data_to_write)
+                            pending_buffer = pending_buffer[safe_len:]
+                
             finally:
                 if output_handle:
                     output_handle.close()
@@ -378,7 +416,8 @@ class APIClient:
                 status="completed",
                 data_size_bytes=total_bytes,
                 t0_sent=t0,
-                t4_received=t4
+                t4_received=t4,
+                timestamps=timestamps_from_stream if timestamps_from_stream else None
             )
             
         except requests.RequestException as e:
@@ -456,6 +495,7 @@ class APIClient:
         poll_url = f"{self.base_url}/datasets/{request_id}/status"
         download_url = None
         data_size = 0
+        timestamps_from_status = {}
         
         for _ in range(int(timeout / self.poll_interval)):
             try:
@@ -465,6 +505,8 @@ class APIClient:
                     if status_data.get("status") == "completed":
                         download_url = status_data.get("download_url")
                         data_size = status_data.get("data_size_bytes", 0)
+                        # Extraer timestamps del status
+                        timestamps_from_status = status_data.get("timestamps") or {}
                         break
                     elif status_data.get("status") == "error":
                         return DatasetResponse(
@@ -519,7 +561,8 @@ class APIClient:
                 status="completed",
                 data_size_bytes=total_bytes or data_size,
                 t0_sent=t0,
-                t4_received=t4
+                t4_received=t4,
+                timestamps=timestamps_from_status if timestamps_from_status else None
             )
             
         except requests.RequestException as e:
