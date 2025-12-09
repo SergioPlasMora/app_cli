@@ -1,0 +1,16 @@
+# Configuración de la Aplicación CLI
+enrutador:
+  base_url: "http://localhost:8000"
+  timeout: 30
+
+polling:
+  interval_ms: 500
+  max_attempts: 60
+
+logging:
+  level: "INFO"
+  format: "text" # "json" o "text"
+
+metrics:
+  enabled: true
+  output_file: "metrics.csv"

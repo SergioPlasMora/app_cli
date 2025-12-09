@@ -1,0 +1,6 @@
+# Core
+requests>=2.31.0
+PyYAML>=6.0
+
+# CLI interface
+rich>=13.0.0
