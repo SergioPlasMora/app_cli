@@ -125,6 +125,114 @@ def cmd_request(args, client: APIClient, metrics: MetricsCollector, logger):
     logger.info(f"TTFB: {entry.ttfb_seconds:.3f}s, Throughput: {entry.throughput_bytes_per_sec:.0f} bytes/s")
 
 
+def cmd_request_sync(args, client: APIClient, metrics: MetricsCollector, logger):
+    """Comando: request-sync <mac> <dataset> (Patrón A - Buffering)."""
+    logger.info(f"[Patrón A] Solicitud síncrona: {args.dataset} de {args.mac}")
+    
+    response = client.request_dataset_sync(
+        mac_address=args.mac,
+        dataset_name=args.dataset,
+        timeout=args.timeout
+    )
+    
+    # Registrar métricas
+    entry = metrics.add_entry(
+        request_id=response.request_id,
+        dataset_name=args.dataset,
+        mac_address=args.mac,
+        t0_sent=response.t0_sent,
+        t4_received=response.t4_received,
+        status=response.status,
+        data_size_bytes=response.data_size_bytes or 0,
+        timestamps=response.timestamps
+    )
+    
+    # Guardar métricas
+    metrics.save_to_csv()
+    
+    # Mostrar resultado
+    print_result(response, args.dataset)
+    
+    # Log de métricas
+    logger.info(f"[Patrón A] TTFB: {entry.ttfb_seconds:.3f}s, Throughput: {entry.throughput_bytes_per_sec:.0f} bytes/s")
+
+
+def cmd_request_stream(args, client: APIClient, metrics: MetricsCollector, logger):
+    """Comando: request-stream <mac> <dataset> (Patrón B - Streaming)."""
+    logger.info(f"[Patrón B] Solicitud streaming: {args.dataset} de {args.mac}")
+    
+    # Archivo de salida opcional
+    output_file = getattr(args, 'output', None)
+    
+    response = client.request_dataset_stream(
+        mac_address=args.mac,
+        dataset_name=args.dataset,
+        output_file=output_file
+    )
+    
+    # Registrar métricas
+    entry = metrics.add_entry(
+        request_id=response.request_id,
+        dataset_name=args.dataset,
+        mac_address=args.mac,
+        t0_sent=response.t0_sent,
+        t4_received=response.t4_received,
+        status=response.status,
+        data_size_bytes=response.data_size_bytes or 0,
+        timestamps=response.timestamps
+    )
+    
+    # Guardar métricas
+    metrics.save_to_csv()
+    
+    # Mostrar resultado
+    print_result(response, args.dataset)
+    
+    # Log de métricas
+    logger.info(f"[Patrón B] TTFB: {entry.ttfb_seconds:.3f}s, Throughput: {entry.throughput_bytes_per_sec:.0f} bytes/s")
+    
+    if output_file:
+        logger.info(f"[Patrón B] Datos guardados en: {output_file}")
+
+
+def cmd_request_offload(args, client: APIClient, metrics: MetricsCollector, logger):
+    """Comando: request-offload <mac> <dataset> (Patrón C - MinIO)."""
+    logger.info(f"[Patrón C] Solicitud offload: {args.dataset} de {args.mac}")
+    
+    output_file = getattr(args, 'output', None)
+    
+    response = client.request_dataset_offload(
+        mac_address=args.mac,
+        dataset_name=args.dataset,
+        output_file=output_file,
+        timeout=args.timeout
+    )
+    
+    # Registrar métricas
+    entry = metrics.add_entry(
+        request_id=response.request_id,
+        dataset_name=args.dataset,
+        mac_address=args.mac,
+        t0_sent=response.t0_sent,
+        t4_received=response.t4_received,
+        status=response.status,
+        data_size_bytes=response.data_size_bytes or 0,
+        timestamps=response.timestamps
+    )
+    
+    # Guardar métricas
+    metrics.save_to_csv()
+    
+    # Mostrar resultado
+    print_result(response, args.dataset)
+    
+    # Log de métricas
+    logger.info(f"[Patrón C] TTFB: {entry.ttfb_seconds:.3f}s, Throughput: {entry.throughput_bytes_per_sec:.0f} bytes/s")
+    
+    if output_file:
+        logger.info(f"[Patrón C] Datos guardados en: {output_file}")
+
+
 def cmd_status(args, client: APIClient, logger):
     """Comando: status <request_id>."""
     logger.info(f"Consultando estado de: {args.request_id}")
@@ -221,9 +329,28 @@ Ejemplos:
     subparsers = parser.add_subparsers(dest="command", help="Comandos disponibles")
     
     # Comando: request
-    p_request = subparsers.add_parser("request", help="Solicita un DataSet")
+    p_request = subparsers.add_parser("request", help="Solicita un DataSet (polling)")
     p_request.add_argument("mac", help="MAC address del Conector")
     p_request.add_argument("dataset", help="Nombre del DataSet")
+    
+    # Comando: request-sync (Patrón A)
+    p_request_sync = subparsers.add_parser("request-sync", help="Solicita un DataSet (síncrono, Patrón A)")
+    p_request_sync.add_argument("mac", help="MAC address del Conector")
+    p_request_sync.add_argument("dataset", help="Nombre del DataSet")
+    p_request_sync.add_argument("--timeout", type=int, default=60, help="Timeout en segundos (default: 60)")
+    
+    # Comando: request-stream (Patrón B)
+    p_request_stream = subparsers.add_parser("request-stream", help="Solicita un DataSet (streaming, Patrón B)")
+    p_request_stream.add_argument("mac", help="MAC address del Conector")
+    p_request_stream.add_argument("dataset", help="Nombre del DataSet")
+    p_request_stream.add_argument("--output", "-o", help="Archivo de salida (opcional)")
+    
+    # Comando: request-offload (Patrón C)
+    p_request_offload = subparsers.add_parser("request-offload", help="Solicita un DataSet (offload MinIO, Patrón C)")
+    p_request_offload.add_argument("mac", help="MAC address del Conector")
+    p_request_offload.add_argument("dataset", help="Nombre del DataSet")
+    p_request_offload.add_argument("--output", "-o", help="Archivo de salida (opcional)")
+    p_request_offload.add_argument("--timeout", type=int, default=60, help="Timeout en segundos (default: 60)")
     
     # Comando: status
     p_status = subparsers.add_parser("status", help="Consulta estado de solicitud")
@@ -263,6 +390,12 @@ Ejemplos:
     # Ejecutar comando
     if args.command == "request":
         cmd_request(args, client, metrics, logger)
+    elif args.command == "request-sync":
+        cmd_request_sync(args, client, metrics, logger)
+    elif args.command == "request-stream":
+        cmd_request_stream(args, client, metrics, logger)
+    elif args.command == "request-offload":
+        cmd_request_offload(args, client, metrics, logger)
     elif args.command == "status":
         cmd_status(args, client, logger)
     elif args.command == "list-hosts":

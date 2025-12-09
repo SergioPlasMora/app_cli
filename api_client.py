@@ -167,6 +167,80 @@ class APIClient:
         except requests.RequestException as e:
             return {"count": 0, "connectors": [], "error": str(e)}
     
+    def request_dataset_sync(
+        self,
+        mac_address: str,
+        dataset_name: str,
+        timeout: int = 60
+    ) -> DatasetResponse:
+        """
+        Patrón A: Solicita un DataSet y espera respuesta completa.
+        
+        Args:
+            mac_address: MAC del Conector destino
+            dataset_name: Nombre del archivo
+            timeout: Tiempo máximo de espera
+            
+        Returns:
+            DatasetResponse con datos completos y métricas
+        """
+        url = f"{self.base_url}/datasets/request-sync"
+        
+        # t0: Aplicación envía solicitud
+        t0 = time.time_ns() / 1e9
+        
+        try:
+            response = self.session.post(
+                url,
+                json={
+                    "mac_address": mac_address,
+                    "dataset_name": dataset_name
+                },
+                params={"timeout": timeout},
+                timeout=timeout + 5  # Dar margen extra al HTTP timeout
+            )
+            
+            # t4: Respuesta recibida
+            t4 = time.time_ns() / 1e9
+            
+            if response.status_code != 200:
+                return DatasetResponse(
+                    request_id="",
+                    status="error",
+                    error_message=f"HTTP {response.status_code}: {response.text}",
+                    t0_sent=t0,
+                    t4_received=t4
+                )
+            
+            data = response.json()
+            
+            return DatasetResponse(
+                request_id=data.get("request_id", ""),
+                status=data.get("status", "completed"),
+                data=data.get("data"),
+                data_size_bytes=data.get("data_size_bytes"),
+                timestamps=data.get("timestamps"),
+                t0_sent=t0,
+                t4_received=t4
+            )
+            
+        except requests.Timeout:
+            return DatasetResponse(
+                request_id="",
+                status="timeout",
+                error_message=f"Timeout después de {timeout} segundos",
+                t0_sent=t0,
+                t4_received=time.time_ns() / 1e9
+            )
+        except requests.RequestException as e:
+            return DatasetResponse(
+                request_id="",
+                status="error",
+                error_message=str(e),
+                t0_sent=t0,
+                t4_received=time.time_ns() / 1e9
+            )
+    
     def health_check(self) -> bool:
         """Verifica si el Enrutador está activo."""
         url = f"{self.base_url}/health"
@@ -176,3 +250,284 @@ class APIClient:
             return response.status_code == 200
         except requests.RequestException:
             return False
+    
+    # =========================================================================
+    # Patrón B: Streaming
+    # =========================================================================
+    
+    def request_dataset_stream(
+        self,
+        mac_address: str,
+        dataset_name: str,
+        output_file: str = None
+    ) -> DatasetResponse:
+        """
+        Patrón B: Solicita un DataSet y lo consume como stream.
+        
+        Args:
+            mac_address: MAC del Conector destino
+            dataset_name: Nombre del archivo
+            output_file: Archivo donde guardar los datos (opcional)
+            
+        Returns:
+            DatasetResponse con métricas
+        """
+        # t0: Envío de solicitud
+        t0 = time.time_ns() / 1e9
+        
+        # 1. Solicitar stream
+        request_url = f"{self.base_url}/datasets/request-stream"
+        try:
+            response = self.session.post(
+                request_url,
+                json={
+                    "mac_address": mac_address,
+                    "dataset_name": dataset_name
+                },
+                timeout=self.timeout
+            )
+            
+            if response.status_code not in (200, 202):
+                return DatasetResponse(
+                    request_id="",
+                    status="error",
+                    error_message=f"HTTP {response.status_code}",
+                    t0_sent=t0,
+                    t4_received=time.time_ns() / 1e9
+                )
+            
+            data = response.json()
+            request_id = data.get("request_id", "")
+            stream_url = data.get("stream_url", "")
+            
+        except requests.RequestException as e:
+            return DatasetResponse(
+                request_id="",
+                status="error",
+                error_message=str(e),
+                t0_sent=t0,
+                t4_received=time.time_ns() / 1e9
+            )
+        
+        # 2. Esperar un momento para que el Conector inicie el stream
+        time.sleep(0.5)
+        
+        # 3. Consumir el stream
+        consume_url = f"{self.base_url}{stream_url}"
+        
+        try:
+            stream_response = self.session.get(
+                consume_url,
+                stream=True,
+                timeout=120
+            )
+            
+            if stream_response.status_code != 200:
+                return DatasetResponse(
+                    request_id=request_id,
+                    status="error",
+                    error_message=f"Stream HTTP {stream_response.status_code}",
+                    t0_sent=t0,
+                    t4_received=time.time_ns() / 1e9
+                )
+            
+            # t_first_byte: Primer chunk recibido
+            t_first_byte = None
+            total_bytes = 0
+            chunks_received = 0
+            
+            # Archivo de salida (opcional)
+            output_handle = None
+            if output_file:
+                output_handle = open(output_file, 'wb')
+            
+            try:
+                for chunk in stream_response.iter_content(chunk_size=65536):
+                    if not chunk:
+                        continue
+                    
+                    if t_first_byte is None:
+                        t_first_byte = time.time_ns() / 1e9
+                    
+                    # Verificar si contiene el marcador de finalización
+                    if b"---STREAM_COMPLETE---" in chunk:
+                        # Extraer solo la parte de datos (antes del marcador)
+                        marker_pos = chunk.find(b"\n---STREAM_COMPLETE---")
+                        if marker_pos > 0:
+                            data_chunk = chunk[:marker_pos]
+                            total_bytes += len(data_chunk)
+                            chunks_received += 1
+                            if output_handle:
+                                output_handle.write(data_chunk)
+                        break
+                    
+                    total_bytes += len(chunk)
+                    chunks_received += 1
+                    
+                    if output_handle:
+                        output_handle.write(chunk)
+            finally:
+                if output_handle:
+                    output_handle.close()
+            
+            # t4: Stream completo
+            t4 = time.time_ns() / 1e9
+            
+            return DatasetResponse(
+                request_id=request_id,
+                status="completed",
+                data_size_bytes=total_bytes,
+                t0_sent=t0,
+                t4_received=t4
+            )
+            
+        except requests.RequestException as e:
+            return DatasetResponse(
+                request_id=request_id,
+                status="error",
+                error_message=str(e),
+                t0_sent=t0,
+                t4_received=time.time_ns() / 1e9
+            )
+    
+    # =========================================================================
+    # Patrón C: Offloading
+    # =========================================================================
+    
+    def request_dataset_offload(
+        self,
+        mac_address: str,
+        dataset_name: str,
+        output_file: str = None,
+        timeout: int = 60
+    ) -> DatasetResponse:
+        """
+        Patrón C: Solicita un DataSet con offloading a MinIO.
+        
+        1. Solicita el dataset al Enrutador
+        2. Hace polling hasta obtener la download_url
+        3. Descarga directamente desde MinIO
+        
+        Args:
+            mac_address: MAC del Conector destino
+            dataset_name: Nombre del archivo
+            output_file: Archivo donde guardar (opcional)
+            timeout: Timeout total en segundos
+            
+        Returns:
+            DatasetResponse con métricas
+        """
+        t0 = time.time_ns() / 1e9
+        
+        # 1. Solicitar offload
+        request_url = f"{self.base_url}/datasets/request-offload"
+        try:
+            response = self.session.post(
+                request_url,
+                json={
+                    "mac_address": mac_address,
+                    "dataset_name": dataset_name
+                },
+                timeout=self.timeout
+            )
+            
+            if response.status_code not in (200, 202):
+                return DatasetResponse(
+                    request_id="",
+                    status="error",
+                    error_message=f"HTTP {response.status_code}",
+                    t0_sent=t0,
+                    t4_received=time.time_ns() / 1e9
+                )
+            
+            data = response.json()
+            request_id = data.get("request_id", "")
+            
+        except requests.RequestException as e:
+            return DatasetResponse(
+                request_id="",
+                status="error",
+                error_message=str(e),
+                t0_sent=t0,
+                t4_received=time.time_ns() / 1e9
+            )
+        
+        # 2. Polling hasta obtener download_url
+        poll_url = f"{self.base_url}/datasets/{request_id}/status"
+        download_url = None
+        data_size = 0
+        
+        for _ in range(int(timeout / self.poll_interval)):
+            try:
+                status_response = self.session.get(poll_url, timeout=self.timeout)
+                if status_response.status_code == 200:
+                    status_data = status_response.json()
+                    if status_data.get("status") == "completed":
+                        download_url = status_data.get("download_url")
+                        data_size = status_data.get("data_size_bytes", 0)
+                        break
+                    elif status_data.get("status") == "error":
+                        return DatasetResponse(
+                            request_id=request_id,
+                            status="error",
+                            error_message=status_data.get("error_message"),
+                            t0_sent=t0,
+                            t4_received=time.time_ns() / 1e9
+                        )
+            except requests.RequestException:
+                pass
+            time.sleep(self.poll_interval)
+        
+        if not download_url:
+            return DatasetResponse(
+                request_id=request_id,
+                status="timeout",
+                error_message="Timeout waiting for download_url",
+                t0_sent=t0,
+                t4_received=time.time_ns() / 1e9
+            )
+        
+        # 3. Descargar desde MinIO
+        try:
+            download_response = self.session.get(download_url, stream=True, timeout=120)
+            
+            if download_response.status_code != 200:
+                return DatasetResponse(
+                    request_id=request_id,
+                    status="error",
+                    error_message=f"Download HTTP {download_response.status_code}",
+                    t0_sent=t0,
+                    t4_received=time.time_ns() / 1e9
+                )
+            
+            total_bytes = 0
+            if output_file:
+                with open(output_file, 'wb') as f:
+                    for chunk in download_response.iter_content(chunk_size=65536):
+                        if chunk:
+                            f.write(chunk)
+                            total_bytes += len(chunk)
+            else:
+                for chunk in download_response.iter_content(chunk_size=65536):
+                    if chunk:
+                        total_bytes += len(chunk)
+            
+            t4 = time.time_ns() / 1e9
+            
+            return DatasetResponse(
+                request_id=request_id,
+                status="completed",
+                data_size_bytes=total_bytes or data_size,
+                t0_sent=t0,
+                t4_received=t4
+            )
+            
+        except requests.RequestException as e:
+            return DatasetResponse(
+                request_id=request_id,
+                status="error",
+                error_message=str(e),
+                t0_sent=t0,
+                t4_received=time.time_ns() / 1e9
+            )
+
