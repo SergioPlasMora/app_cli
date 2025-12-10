@@ -5,7 +5,7 @@ pip install -r requirements.txt
 python main.py list-hosts
 
 # Solicitar un DataSet
-python main.py request 10-51-07-96-d5-49 dataset_1kb.json
+python main.py request cc-28-aa-cd-5c-74 dataset_1kb.json
 
 # Ver métricas
 python main.py metrics
@@ -22,12 +22,12 @@ python main.py list-hosts
 
 # Patrón A: Buffering (respuesta síncrona)
 
-python main.py request-sync 10-51-07-96-d5-49 dataset_50mb.csv
+python main.py request-sync cc-28-aa-cd-5c-74 dataset_100mb.csv
 
 # Patrón B: Streaming (chunks en tiempo real)
 
-python main.py request-stream 10-51-07-96-d5-49 dataset_50mb.csv
+python main.py request-stream cc-28-aa-cd-5c-74 dataset_100mb.csv
 
 # Patrón C: Offloading (MinIO)
 
-python main.py request-offload 10-51-07-96-d5-49 dataset_50mb.csv
+python main.py request-offload cc-28-aa-cd-5c-74 dataset_100mb.csv
