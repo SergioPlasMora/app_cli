@@ -25,12 +25,12 @@ except ImportError:
     print("Verifica que ../app_cli esté disponible")
     sys.exit(1)
 
-
+# cc-28-aa-cd-5c-74
 @dataclass
 class LoadTestConfig:
     """Configuración de la prueba de carga."""
     enrutador_url: str = "http://localhost:8000"
-    mac_address: str = "10-51-07-96-d5-49"
+    mac_address: str = "cc-28-aa-cd-5c-74"
     concurrent_users: int = 10
     requests_per_user: int = 1
     pattern: str = "A"  # A, B, C, or "all"
@@ -315,7 +315,7 @@ Ejemplos:
     )
     
     parser.add_argument("--url", default="http://localhost:8000", help="URL del Enrutador")
-    parser.add_argument("--mac", default="10-51-07-96-d5-49", help="MAC address del Conector")
+    parser.add_argument("--mac", default="cc-28-aa-cd-5c-74", help="MAC address del Conector")
     parser.add_argument("--users", "-u", type=int, default=10, help="Número de usuarios concurrentes")
     parser.add_argument("--requests", "-r", type=int, default=1, help="Requests por usuario")
     parser.add_argument("--pattern", "-p", choices=["A", "B", "C", "all"], default="A", 
