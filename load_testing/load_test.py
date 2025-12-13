@@ -31,8 +31,8 @@ class LoadTestConfig:
     """Configuración de la prueba de carga."""
     enrutador_url: str = "http://localhost:8000"
     mac_address: str = "cc-28-aa-cd-5c-74"
-    concurrent_users: int = 10
-    requests_per_user: int = 1
+    total_requests: int = 100  # Total de requests a ejecutar
+    concurrency: int = 10      # Máximo de requests simultáneas
     pattern: str = "A"  # A, B, C, or "all"
     dataset_name: str = "dataset_1kb.json"
     timeout: int = 60
@@ -113,62 +113,56 @@ def execute_request_pattern_c(client: APIClient, config: LoadTestConfig) -> Data
     )
 
 
-def worker_thread(user_id: int, config: LoadTestConfig, start_delay: float = 0) -> List[DatasetResponse]:
+def worker_thread(request_id: int, config: LoadTestConfig) -> DatasetResponse:
     """
-    Thread worker que simula un usuario ejecutando N requests.
+    Thread worker que ejecuta UNA sola request.
+    IGUAL QUE ARROW: Cada request es independiente para máxima concurrencia.
     
     Args:
-        user_id: ID del usuario simulado
+        request_id: ID de la request
         config: Configuración de la prueba
-        start_delay: Delay antes de comenzar (para ramp-up)
     
     Returns:
-        Lista de respuestas
+        Respuesta de la request
     """
-    if start_delay > 0:
-        time.sleep(start_delay)
-    
+    # Crear nuevo cliente con conexión independiente para cada request
     client = APIClient(
         base_url=config.enrutador_url,
         timeout=config.timeout
     )
     
-    results = []
-    
-    for i in range(config.requests_per_user):
-        try:
-            if config.pattern == "A":
+    try:
+        if config.pattern == "A":
+            response = execute_request_pattern_a(client, config)
+        elif config.pattern == "B":
+            response = execute_request_pattern_b(client, config)
+        elif config.pattern == "C":
+            response = execute_request_pattern_c(client, config)
+        else:
+            # Rotar entre patrones
+            pattern_index = request_id % 3
+            if pattern_index == 0:
                 response = execute_request_pattern_a(client, config)
-            elif config.pattern == "B":
+            elif pattern_index == 1:
                 response = execute_request_pattern_b(client, config)
-            elif config.pattern == "C":
-                response = execute_request_pattern_c(client, config)
             else:
-                # Rotar entre patrones
-                pattern_index = (user_id + i) % 3
-                if pattern_index == 0:
-                    response = execute_request_pattern_a(client, config)
-                elif pattern_index == 1:
-                    response = execute_request_pattern_b(client, config)
-                else:
-                    response = execute_request_pattern_c(client, config)
-            
-            results.append(response)
-            
-        except Exception as e:
-            print(f"[User {user_id}] Error: {e}")
-            results.append(DatasetResponse(
-                request_id="",
-                status="error",
-                error_message=str(e)
-            ))
-    
-    return results
+                response = execute_request_pattern_c(client, config)
+        
+        return response
+        
+    except Exception as e:
+        print(f"[Request {request_id}] Error: {e}")
+        return DatasetResponse(
+            request_id="",
+            status="error",
+            error_message=str(e)
+        )
 
 
 def run_load_test(config: LoadTestConfig, logger) -> LoadTestResult:
     """
-    Ejecuta la prueba de carga con múltiples usuarios concurrentes.
+    Ejecuta la prueba de carga.
+    IGUAL QUE ARROW: --requests N total, --concurrency M simultáneas.
     
     Args:
         config: Configuración de la prueba
@@ -178,44 +172,37 @@ def run_load_test(config: LoadTestConfig, logger) -> LoadTestResult:
         Resultado agregado
     """
     logger.info(f"🚀 Iniciando prueba de carga")
-    logger.info(f"   Usuarios concurrentes: {config.concurrent_users}")
-    logger.info(f"   Requests por usuario: {config.requests_per_user}")
-    logger.info(f"   Patrón: {config.pattern}")
-    logger.info(f"   Dataset: {config.dataset_name}")
-    logger.info(f"   Ramp-up: {config.ramp_up_seconds}s")
+    logger.info(f"   Total requests: {config.total_requests}")
+    logger.info(f"   Concurrencia:   {config.concurrency}")
+    logger.info(f"   Patrón:         {config.pattern}")
+    logger.info(f"   Dataset:        {config.dataset_name}")
     
     result = LoadTestResult()
     all_responses: List[DatasetResponse] = []
     
-    # Calcular delay entre usuarios para ramp-up
-    if config.ramp_up_seconds > 0 and config.concurrent_users > 1:
-        delay_per_user = config.ramp_up_seconds / config.concurrent_users
-    else:
-        delay_per_user = 0
-    
     # Timestamp de inicio
     start_time = time.perf_counter()
     
-    # Ejecutar usuarios en paralelo con ThreadPoolExecutor
-    with ThreadPoolExecutor(max_workers=config.concurrent_users) as executor:
+    # Ejecutar con ThreadPoolExecutor - IGUAL QUE ARROW
+    with ThreadPoolExecutor(max_workers=config.concurrency) as executor:
         futures = []
         
-        for user_id in range(config.concurrent_users):
-            start_delay = user_id * delay_per_user
-            future = executor.submit(worker_thread, user_id, config, start_delay)
+        # CLAVE: Cada request individual es un task independiente
+        for request_id in range(config.total_requests):
+            future = executor.submit(worker_thread, request_id, config)
             futures.append(future)
         
         # Recolectar resultados conforme completan
-        completed_users = 0
+        completed = 0
         for future in as_completed(futures):
             try:
-                responses = future.result()
-                all_responses.extend(responses)
-                completed_users += 1
+                response = future.result()
+                all_responses.append(response)
+                completed += 1
                 
-                # Mostrar progreso
-                if completed_users % max(1, config.concurrent_users // 10) == 0:
-                    logger.info(f"   Progreso: {completed_users}/{config.concurrent_users} usuarios completados")
+                # Mostrar progreso cada 10%
+                if completed % max(1, config.total_requests // 10) == 0:
+                    logger.info(f"   Progreso: {completed}/{config.total_requests} requests completadas")
                 
             except Exception as e:
                 logger.error(f"   Error en worker: {e}")
@@ -262,10 +249,10 @@ def print_results(result: LoadTestResult, config: LoadTestConfig):
     print("=" * 80)
     
     print(f"\n🔧 Configuración:")
-    print(f"   Usuarios concurrentes: {config.concurrent_users}")
-    print(f"   Requests por usuario:  {config.requests_per_user}")
-    print(f"   Patrón:                {config.pattern}")
-    print(f"   Dataset:               {config.dataset_name}")
+    print(f"   Total requests: {config.total_requests}")
+    print(f"   Concurrencia:   {config.concurrency}")
+    print(f"   Patrón:         {config.pattern}")
+    print(f"   Dataset:        {config.dataset_name}")
     
     print(f"\n📈 Resultados Generales:")
     print(f"   Total requests:        {result.total_requests}")
@@ -303,26 +290,25 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Ejemplos:
-  # 100 usuarios concurrentes, Patrón A
-  python load_test.py --users 100 --pattern A --dataset dataset_1mb.csv
+  # 1000 requests, 20 concurrentes (IGUAL QUE ARROW)
+  python load_test.py --requests 1000 --concurrency 20 --pattern B --dataset dataset_1mb.csv
   
-  # 1000 usuarios, todos los patrones mezclados
-  python load_test.py --users 1000 --pattern all --dataset dataset_10mb.csv
+  # 500 requests, 50 concurrentes, todos los patrones
+  python load_test.py --requests 500 --concurrency 50 --pattern all
   
-  # 500 usuarios, con ramp-up de 10 segundos
-  python load_test.py --users 500 --pattern B --ramp-up 10
+  # 100 requests, 10 concurrentes, Patrón A
+  python load_test.py --requests 100 --concurrency 10 --pattern A
         """
     )
     
     parser.add_argument("--url", default="http://localhost:8000", help="URL del Enrutador")
     parser.add_argument("--mac", default="cc-28-aa-cd-5c-74", help="MAC address del Conector")
-    parser.add_argument("--users", "-u", type=int, default=10, help="Número de usuarios concurrentes")
-    parser.add_argument("--requests", "-r", type=int, default=1, help="Requests por usuario")
+    parser.add_argument("--requests", "-r", type=int, default=100, help="Total de requests a ejecutar")
+    parser.add_argument("--concurrency", "-c", type=int, default=10, help="Requests simultáneas (paralelas)")
     parser.add_argument("--pattern", "-p", choices=["A", "B", "C", "all"], default="A", 
                         help="Patrón a probar (A=Buffering, B=Streaming, C=Offloading, all=mezclado)")
     parser.add_argument("--dataset", "-d", default="dataset_1kb.json", help="Nombre del dataset")
     parser.add_argument("--timeout", "-t", type=int, default=60, help="Timeout en segundos")
-    parser.add_argument("--ramp-up", type=int, default=0, help="Tiempo de ramp-up en segundos")
     
     args = parser.parse_args()
     
@@ -330,12 +316,11 @@ Ejemplos:
     config = LoadTestConfig(
         enrutador_url=args.url,
         mac_address=args.mac,
-        concurrent_users=args.users,
-        requests_per_user=args.requests,
+        total_requests=args.requests,
+        concurrency=args.concurrency,
         pattern=args.pattern,
         dataset_name=args.dataset,
-        timeout=args.timeout,
-        ramp_up_seconds=args.ramp_up
+        timeout=args.timeout
     )
     
     # Logger
